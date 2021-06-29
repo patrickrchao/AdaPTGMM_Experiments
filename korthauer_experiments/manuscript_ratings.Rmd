@@ -1,0 +1,928 @@
+---
+title: "Final Ratings for Genome Biology"
+author: "Rafalab"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This Rmd is used to determine the ratings for each method shown in Figure 4.
+
+# Set up workspace 
+
+```{r load-workspace, message = FALSE}
+## Load packages and source benchmark FDR
+library(tidyverse)
+library(dplyr)
+library(cowplot)
+library(ggthemes)
+library(grid)
+library(SummarizedBenchmark)
+
+## load helper functions
+for (f in list.files("../R", "\\.(r|R)$", full.names = TRUE)) {
+    source(f)
+}
+insertSource("./R/PerformanceMetricsNew.R", package = "SummarizedBenchmark",
+             functions = "tidyUpMetrics")
+if(packageVersion("SummarizedBenchmark") != "0.99.2"){
+  stop("Summarized Benchmark version is incorrect, please run 'devtools::install_github('areyesq89/SummarizedBenchmark', ref = 'fdrbenchmark')'.")
+}
+# Assumes sb objects for the case studies and in silico experiments are in 
+# the following location, which contains subfolders
+# for each casestudy (if this isn't true, then parsing the case study and 
+# dataset names later on will be incorrect)
+#path <- "../results"
+rna_path <- "./simulations/results/"
+gmm_casestudy_path <- "./casestudies/results/"
+original_casestudy_path <- "./casestudies/original_results/"
+
+# Also assumes that simulation results summary file is in the following location
+# The `result-metrics.rds` was generated in the 
+# `datasets/simulations/simulations-summary.Rmd` file.
+simres_file <- file.path("simulations/results-summary/full-result-metrics.rds")
+
+# set up results directory
+outdir <- "./figures"
+dir.create(outdir, showWarnings = FALSE)
+
+# set alpha cutoff for plots that are fixed at a certain value of alpha
+alpha.thresh <- 0.05
+
+# methods to include in all figures (exclude bonferroni and fdrreg-e)
+methodset <- c("bh", "ihw", "qvalue", "bl", "lfdr",
+               "fdrreg-t", "ashq", "adapt-glm","adapt-gmm")
+```
+
+# Combine case studies files with proper names
+```{r}
+
+gmm_obj <- list.files(gmm_casestudy_path, recursive = TRUE, pattern = "rds", full.names = TRUE)
+orig_obj <- list.files(original_casestudy_path, recursive = TRUE, pattern = "rds", full.names = TRUE)
+headings <- c("ChIP-seq","GSEA","GWAS","microbiome","RNA-Seq","scrnaseq")
+combined_casestudy_dir <- "./casestudies/combined-results"
+dir.create(combined_casestudy_dir, showWarnings = FALSE)
+dir.create(file.path(combined_casestudy_dir,"gmm"), showWarnings = FALSE)
+for(heading in headings){
+  dir.create(file.path(combined_casestudy_dir,heading), showWarnings = FALSE)  
+  dir.create(file.path(combined_casestudy_dir,"gmm",heading), showWarnings = FALSE)  
+}
+
+place_in_folders <- function(objects,path){
+  for(name in objects){
+    base <- basename(name)
+    base <- stringr::str_remove(base,"-benchmark")
+    obj <- readRDS(name)
+    if(grepl("cbp",base) | grepl("h3k4me3",base)){
+      saveRDS(object = obj,file=file.path(path,"ChIP-seq",base))
+    }else if(grepl("bmi",base)){
+      saveRDS(object = obj,file=file.path(path,"GWAS",base))
+    }else if(grepl("baxter",base) | grepl("enigma",base) | grepl("papa",base) | grepl("goodrich",base) | grepl("schubert",base)){
+      saveRDS(object = obj,file=file.path(path,"microbiome",base))
+    }else if(grepl("brain",base) | grepl("mir200c",base)){
+      saveRDS(object = obj,file=file.path(path,"RNA-Seq",base))
+    }else if(base =="human-benchmark.rds" | base == "human.rds" | base == "mouse-benchmark.rds" | base == "mouse.rds"){
+      saveRDS(object = obj,file=file.path(path,"GSEA",base))
+    }else{
+      saveRDS(object = obj,file=file.path(path,"scrnaseq",base))
+    }
+    
+  }
+}
+
+place_in_folders(orig_obj,combined_casestudy_dir)
+place_in_folders(gmm_obj,file.path(combined_casestudy_dir,"gmm"))
+
+
+```
+
+We use the standardize candy color scheme and line types for the plots. We'll
+add the "lfdr*" method, which indicates lfdr was applied with fewer than 200 
+tests per bin (out of 20 bins).
+
+```{r}
+col <- as.character(candycols$col)
+names(col) <- as.character(candycols$Method)
+lty <- as.character(candycols$lty)
+names(lty) <- as.character(candycols$Method)
+```
+
+To generate the figures in this document, the simulation results must first be aggregated by running the code at `simulations/simulations-summary.Rmd` and `simulation_figures.Rmd`.
+
+```{r load-sim-metrics}
+simres <- readRDS(simres_file)
+```
+
+We similarly load all other results from the following files.
+
+```{r}
+objects <- list.files(rna_path, recursive = TRUE, pattern = "rds", full.names = TRUE)
+```
+
+# Summarize Data Sets
+
+## Yeast
+
+```{r}
+objects_yeast <- grep("yeast", objects, value = TRUE)
+
+## read just yeast samples
+if (file.exists("yeastres_gmm.rds")) {
+    yeastres_gmm <- readRDS("yeastres_gmm.rds")
+    names(yeastres_gmm)[names(yeastres_gmm)=="label"] <- "blabel"
+    yeastres <- bind_rows(yeastres_gmm,readRDS("yeastres.rds"))
+} else {
+    yeastres <- lapply(objects_yeast, readRDS)
+    yeastres <- lapply(yeastres, plotsim_standardize, alpha = alpha.thresh)
+    
+    names(yeastres) <- basename(objects_yeast)
+    yeastres <- bind_rows(yeastres, .id = "series")
+    levels(yeastres$label) <- c(levels(yeastres$label), "adapt-gmm")
+    yeastres$label[yeastres$label=="AdaPTGMM"] <- "adapt-gmm"
+    saveRDS(yeastres, "yeastres_gmm.rds")
+    yeastres_gmm <- yeastres
+    names(yeastres_gmm)[names(yeastres_gmm)=="label"] <- "blabel"
+    yeastres <- bind_rows(yeastres_gmm,readRDS("yeastres.rds"))
+}    
+
+ ## clean up the results
+yeast <- dplyr::select(yeastres, series, rep, blabel, param.alpha, alpha, performanceMetric,value)
+yeast <- dplyr::filter(yeast, as.numeric(param.alpha) == alpha | is.na(param.alpha))
+yeast <- dplyr::mutate(yeast, blabel = ifelse(grepl("ihw", blabel), "ihw", blabel))
+yeast <- dplyr::mutate(yeast, blabel = ifelse(blabel == "bl-df03", "bl", blabel))
+yeast <- dplyr::filter(yeast, blabel %in% methodset)
+yeast <- dplyr::select(yeast, -param.alpha, -alpha)
+yeast <- dplyr::rename(yeast, Method = blabel)
+
+## use 0s for "rates" that are reported as NAs
+yeast <- dplyr::mutate(yeast, value = ifelse(is.na(value), 0, value))
+
+## compute mean and standard errors for each method in each sim for each metric
+yeast <- dplyr::group_by(yeast, series, Method, performanceMetric)
+yeast <- dplyr::summarize(yeast, mean = mean(value, na.rm = TRUE),
+                          se = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))))
+yeast <- dplyr::ungroup(yeast)
+
+## clean up the simulation names
+yeast <- dplyr::mutate(yeast, series = gsub("\\.rds", "", series))
+yeast <- tidyr::separate(yeast, series, c("setting_base", "setting_res", "setting_de", "setting_cov"),
+                         fill = "right")
+yeast <- dplyr::select(yeast, -setting_res)
+yeast <- dplyr::mutate(yeast, setting_mode = ifelse(grepl("II", setting_base), "bimodal", "unimodal"))
+yeast <- dplyr::mutate(yeast, setting_pi0 = ifelse(grepl("H", setting_base), "7.5%", "30%"))
+
+yeast <- dplyr::mutate(yeast, setting_cov = ifelse(is.na(setting_cov), "strongInfoCov", setting_cov))
+yeast <- dplyr::mutate(yeast, setting_cov = ifelse(grepl("W", setting_base), "weakInfoCov", setting_cov))
+yeast <- dplyr::select(yeast, -setting_base)
+```
+
+We also rank each method in each setting according to FDR and TPR.
+
+```{r}
+yeast <- dplyr::group_by(yeast, setting_de, setting_cov, setting_mode, setting_pi0,performanceMetric)
+yeast <- dplyr::mutate(yeast, rank = rank(-mean))
+yeast <- dplyr::ungroup(yeast)
+```
+
+## Case Studies
+
+```{r}
+objects_dat <- list.files(combined_casestudy_dir, recursive = TRUE, pattern = "rds", full.names = TRUE)
+objects_dat <- objects_dat[!grepl("polyester", objects_dat) & !grepl("yeast", objects_dat)]
+
+
+## remove microbiome objects from 'null' comparisons
+## removing baxter, goodrich, papa OTU-level, and So4-enigma (since they mostly found
+## nothing for all methods and the genus-level analysis is also present)
+## Also remove'log' ubiquity since redundant
+null <- grepl(c("goodrich|papa"), objects_dat) &
+    grepl(c("otu"), objects_dat) |
+    grepl("baxter", objects_dat) |
+    grepl("log", objects_dat) |
+    grepl("so4", objects_dat)
+objects_dat <- objects_dat[!null]
+
+## remove chip-seq promoter analysis (since it is the only one that uses
+## ash and we also include the csaw analysis on the same dataset).
+promot <- grepl("promot", objects_dat)
+objects_dat <- objects_dat[!promot]
+
+# remove random covariate analyses
+uninf <- grepl("uninf", objects_dat)
+objects_dat <- objects_dat[!uninf]
+
+## read just real data samples
+if (file.exists("datres.rds")) {
+    datres <- readRDS("datres.rds")
+} else {
+    datres <- lapply(objects_dat, readRDS)
+
+    ## gather all results
+    
+    for(i in 1:length(objects_dat)){
+        if("bench" %in% assayNames(datres[[i]])){
+        datres[[i]] <- assay(datres[[i]],"bench")
+        }else{
+            datres[[i]] <- assay(datres[[i]],"default")
+        }
+        
+    }
+
+    datres <- lapply(datres, as_tibble)
+    objects_dat <- unlist(lapply(objects_dat,function(x){y = strsplit(x, "/")[[1]]
+    return(paste0(y[(length(y)-1):length(y)],collapse="/")[[1]])}))
+    names(datres) <- gsub("^\\.\\./results/(.*?)-benchmark(.*)\\.rds", "\\1\\2", objects_dat)
+    datres <- bind_rows(datres, .id = "cs")
+
+    datres <- tidyr::separate(datres, cs, c("casestudy", "dataset"), sep = "/")
+    datres <- tidyr::gather(datres, Method, adjp, -casestudy, -dataset)
+    datres[datres$Method=="AdaPTGMM","Method"] <- "adapt-gmm"
+    ## summarize results
+    datres <- dplyr::group_by(datres, casestudy, dataset, Method)
+    datres <- dplyr::summarize(datres, ntotal = n(), nNA = sum(is.na(adjp)),
+                               nrej = sum(adjp < alpha.thresh, na.rm = TRUE))
+    datres <- dplyr::ungroup(datres)
+
+    saveRDS(datres, "datres.rds")
+}
+
+## NAs only appear in cases where the method wasn't applied so we can go ahead
+## and replace the nrej values with NA for these methods
+datres <- dplyr::mutate(datres, nrej = ifelse(nNA/ntotal > .99, NA, nrej))
+
+## clean up method names
+iihw <- paste0("ihw-a", sprintf("%02d", 100*alpha.thresh))
+datres <- dplyr::mutate(datres, Method = ifelse(grepl(iihw, Method), "ihw", Method))
+datres <- dplyr::mutate(datres, Method = ifelse(Method == "bl-df03", "bl", Method))
+datres <- dplyr::filter(datres, Method %in% methodset)
+
+## add method rank in each category
+datres <- dplyr::group_by(datres, casestudy, dataset)
+datres <- dplyr::mutate(datres, rank = rank(-nrej)) 
+datres <- dplyr::mutate(datres, rank = ifelse(is.na(nrej), NA, rank))
+datres <- dplyr::ungroup(datres)
+```
+
+## Simulations
+
+We can use the results stored in `simres` for simulation settings.
+For easier plotting, we replace create a shorter distribution string column.
+
+```{r}
+simres <- dplyr::mutate(simres, sdist = factor(dist, sort(levels(dist)), c("chisq", "normal", "t11", "t5")))
+```
+
+We only look at results at the desired alpha cutoff, and remove `fdrreg-e` from this comparison.
+
+```{r}
+simres <- dplyr::filter(simres, Method != "fdrreg-e", Method != "bonf", alpha == alpha.thresh)
+```
+
+We also rank each method in each setting according to FDR and TPR.
+
+```{r}
+simres <- dplyr::group_by(simres, setting, dist, inform, pi0, signal, ntests, sdist,performanceMetric)
+simres <- dplyr::mutate(simres, rank = rank(-mean.info))
+simres <- dplyr::ungroup(simres)
+```
+
+For consistency across plotting of settings, we relabel some settings.
+
+```{r}
+simres <- dplyr::mutate(simres, setting = ifelse(setting == "varyingpi0-t", "varyingpi0", setting))
+```
+
+# Exploratory Figures
+
+After summarizing all yeast experiments, simulations, and case studies, we take a look at the
+aggregated results.
+
+## Yeast
+
+```{r, fig.width = 8, fig.height = 12, eval = FALSE}
+dplyr::filter(yeast, performanceMetric == "FDR") %>%
+    ggplot(aes(x = interaction(setting_mode, setting_cov, setting_pi0, setting_de),
+               y = mean, ymin = mean - se, ymax = mean+se, color = Method)) +
+    geom_point(size = 1/2, position = position_dodge(width = 1/2)) +
+    geom_errorbar(position = position_dodge(width = 1/2)) +
+    facet_grid(Method ~ setting_de, scales = "free_x", space = "free_x") +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("FDR") +
+    xlab(NULL) +
+    theme_bw() +
+    geom_hline(yintercept = 0.05, linetype = 2, color = "blue", alpha = 1/2) + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Yeast Experiments: FDR control across settings, alpha = ", alpha.thresh))
+
+dplyr::filter(yeast, performanceMetric == "TPR", !grepl("null", setting_de)) %>%
+    ggplot(aes(x = interaction(setting_mode, setting_pi0),
+               y = mean, ymin = mean - se, ymax = mean+se, color = Method)) +
+    geom_point(size = 1/2, position = position_dodge(width = 1/2)) +
+    geom_errorbar(position = position_dodge(width = 1/2)) +
+    facet_grid(setting_de ~ setting_cov) +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("TPR") +
+    xlab(NULL) +
+    theme_bw() +
+    geom_hline(yintercept = 0.05, linetype = 2, color = "blue", alpha = 1/2) + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Yeast Experiments: TPR across settings, alpha = ", alpha.thresh))
+```
+
+Now we also look at the ranks of methods.
+
+```{r, fig.width = 8, fig.height = 12, eval = FALSE}
+dplyr::filter(yeast, key == "FDR") %>%
+    ggplot(aes(x = interaction(setting_mode, setting_cov, setting_pi0, setting_de),
+               y = rank, color = Method)) +
+    geom_point(size = 4, position = position_dodge(width = 1/2)) +
+    facet_grid(Method ~ setting_de, scales = "free_x", space = "free_x") +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("FDR rank") +
+    xlab(NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Yeast Experiments: method rank for TPR, alpha = ", alpha.thresh))
+
+dplyr::filter(yeast, key == "TPR", !grepl("null", setting_de)) %>%
+    ggplot(aes(x = interaction(setting_mode, setting_cov, setting_pi0, setting_de),
+               y = rank, color = Method)) +
+    geom_point(size = 4, position = position_dodge(width = 1/2)) +
+    facet_grid(Method ~ setting_de, scales = "free_x", space = "free_x") +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("TPR rank") +
+    xlab(NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Yeast Experiments: method rank for TPR, alpha = ", alpha.thresh))
+```
+
+## Case Studies
+
+```{r, fig.width = 10, fig.height = 5, eval = FALSE}
+ggplot(datres, aes(x = dataset, y = nrej / ntotal, color = Method)) +
+    geom_point(size = 3/4, position = position_dodge(width = 1/2)) +
+    facet_grid(. ~ casestudy, scales = "free_x", space = "free_x") +
+    expand_limits(y = c(0, 1)) +
+    scale_color_manual(values = col) +
+    scale_y_continuous("Percent Rejections", labels = scales::percent) +
+    xlab(NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1)) +
+    ggtitle(paste0("Case Study: method rejection proportion, alpha = ", alpha.thresh))
+```
+
+```{r, fig.width = 10, fig.height = 14, eval = FALSE}
+ggplot(datres, aes(x = dataset, y = rank, color = Method, group = Method)) +
+    geom_line(size = 1/2, alpha = 1/4, position = position_dodge(width = 1/4)) +
+    geom_point(size = 1, position = position_dodge(width = 1/4)) +
+    facet_grid(Method ~ casestudy, scales = "free_x", space = "free_x") +
+    scale_color_manual(values = col) +
+    scale_y_continuous("Rank", breaks = 1:8) +
+    xlab(NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1)) +
+    ggtitle(paste0("Case Study: method rank for total rejections, alpha = ", alpha.thresh))
+```
+
+```{r, fig.width = 10, fig.height = 6, eval = FALSE}
+ggplot(datres, aes(x = dataset, y = rank, color = Method, group = Method)) +
+    geom_point(size = 4, position = position_dodge(width = 1/2)) +
+    facet_grid(. ~ casestudy, scales = "free_x", space = "free_x") +
+    scale_color_manual(values = col) +
+    scale_y_continuous("Rank", breaks = 1:8) +
+    xlab(NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1)) +
+    ggtitle(paste0("Case Study: method rank for total rejections, alpha = ", alpha.thresh))
+```
+
+## Simulations
+
+```{r, eval = FALSE}
+dplyr::filter(simres, performanceMetric == "FDR") %>%
+    tidyr::unite(subsetting, sdist, inform, pi0, signal, ntests) %>%
+    ggplot(aes(x = subsetting,
+               y = mean.info, ymin = mean.info - se.info, ymax = mean.info + se.info, color = Method)) +
+    geom_point(size = 1/2, position = position_dodge(width = 1/2)) +
+    geom_errorbar(position = position_dodge(width = 1/2)) +
+    facet_grid(Method ~ setting, space = "free_x", scales = "free_x") +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("FDR") +
+    xlab(NULL) +
+    theme_bw() +
+    geom_hline(yintercept = 0.05, linetype = 2, color = "blue", alpha = 1/2) + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Simulations: FDR control across settings, alpha = ", alpha.thresh))
+
+dplyr::filter(yeast, key == "TPR", !grepl("null", setting_de)) %>%
+    ggplot(aes(x = interaction(setting_mode, setting_pi0),
+               y = mean, ymin = mean - se, ymax = mean+se, color = Method)) +
+    geom_point(size = 1/2, position = position_dodge(width = 1/2)) +
+    geom_errorbar(position = position_dodge(width = 1/2)) +
+    facet_grid(setting_de ~ setting_cov) +
+    expand_limits(y = 0) +
+    scale_linetype_manual(values = lty) + 
+    scale_color_manual(values = col) +
+    ylab("TPR") +
+    xlab(NULL) +
+    theme_bw() +
+    geom_hline(yintercept = 0.05, linetype = 2, color = "blue", alpha = 1/2) + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1, size = 6)) +
+    ggtitle(paste0("Yeast Experiments: TPR across settings, alpha = ", alpha.thresh))
+```
+
+
+# Ratings
+
+We determine cutoffs using the summarized results.
+
+## FDR Control
+
+FDR control ratings are determined using only the yeast experiments and simulation
+results where ground truth is known.
+
+```{r}
+## FDR control across simulation settings
+fdrcontrol_sims <- simres %>%
+    dplyr::filter(performanceMetric  == "FDR", !grepl("null", setting), sdist != "chisq") %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(nExceeds = sum((mean.info - se.info) > alpha.thresh),
+                     pExceeds = round(nExceeds / n(), 4)) %>%
+    dplyr::ungroup()
+
+## FDR control across yeast settings
+fdrcontrol_yeast <- yeast %>%
+    dplyr::filter(performanceMetric == "FDR", !grepl("null", setting_de)) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(nExceeds = sum((mean - se) > alpha.thresh),
+                     pExceeds = round(nExceeds / n(), 4)) %>%
+    dplyr::ungroup()
+
+## combine
+fdrcontrol <- dplyr::left_join(fdrcontrol_sims, fdrcontrol_yeast, by = "Method",
+                               suffix = c(".sims", ".yeast"))
+dplyr::arrange(fdrcontrol, pExceeds.sims + pExceeds.yeast)
+```
+
+We plot the results as well.
+
+```{r, fig.width = 6, fig.height = 4}
+bind_rows(yeast = fdrcontrol_yeast, sims = fdrcontrol_sims, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, pExceeds)) %>%
+    ggplot(aes(x = Method, y = pExceeds, color = Method, group = analysis)) +
+    geom_line(aes(linetype = analysis), color = 'black', alpha = 1/4) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("Percent of settings exceeding nominal FDR", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("FDR control across simulations and yeast experiments") 
+```
+
+## Power
+
+Similarly, power ratings are only determined using only the yeast experiments and
+simulation results where ground truth is known.
+
+```{r}
+## power across simulation settings
+power_sims <- simres %>%
+    dplyr::filter(performanceMetric == "TPR", alpha == alpha.thresh,
+                  !grepl("null", setting), sdist != "chisq") %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(meanRank = mean(rank),
+                     medianRank = median(rank)) %>%
+    dplyr::ungroup()
+
+## power across yeast settings
+power_yeast <- yeast %>%
+    dplyr::filter(performanceMetric == "TPR", !grepl("null", setting_de)) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(meanRank = mean(rank),
+                     medianRank = median(rank)) %>%
+    dplyr::ungroup()
+
+## combine
+power <- dplyr::left_join(power_sims, power_yeast, by = "Method",
+                          suffix = c(".sims", ".yeast"))
+dplyr::arrange(power, meanRank.sims + meanRank.yeast)
+```
+
+We plot the results as well.
+
+```{r, fig.width = 6, fig.height = 4}
+bind_rows(yeast = power_yeast, sims = power_sims, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, meanRank)) %>%
+    ggplot(aes(x = Method, y = meanRank, color = Method, group = analysis)) +
+    geom_line(aes(linetype = analysis), color = 'black', alpha = 1/4) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("Mean TPR rank", breaks = 0:10) + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("TPR rank across simulations and yeast experiments") 
+
+bind_rows(yeast = power_yeast, sims = power_sims, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, medianRank)) %>%
+    ggplot(aes(x = Method, y = medianRank, color = Method, group = analysis)) +
+    geom_line(aes(linetype = analysis), color = 'black', alpha = 1/4) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("Median TPR rank", breaks = 0:10) + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("TPR rank across simulations and yeast experiments") 
+```
+
+## Consistency
+
+Next, we define metrics for the consistency metric, which quantifies the amount of consistency,
+of each method across simulations and case studies. While the yeast experiments
+could also be included as part of the consistency calculation, it is excluded, primarily because
+all settings are variations on differential expression in RNA-seq, and therefore contains far
+less variable settings as compared to the simulations and case studies.
+
+For this metric, we only look at modern methods, i.e. exclude Bonferroni correction, BH, and
+Storey's q-value. We do this, as we quantify "consistency" as the relative gain of each method
+over the average of BH and q-value in FDR and TPR (and proportion of rejections for case studies).
+
+We exclude both `ashq` and `fdrreg-t` from the analysis of the case studies here because they
+were applied in substantially fewer case studies (only 4/26). The gain over BH/q-value can vary
+substantially based on the informativeness of the covariate and therefore, if a method was applied
+to far fewer case studies, it may have an arbitrarily smaller or larger amount of variability across
+case studies simply due to the composition of the subset relative to the composition of the
+entire collection of case studies.
+
+```{r}
+## consistency across simulation settings
+consistency_sims <- simres %>%
+    dplyr::filter(performanceMetric == "TPR" | performanceMetric == "FDR", alpha == alpha.thresh,
+                  !grepl("null", setting), sdist != "chisq",
+                  Method != "bonf") %>%
+    dplyr::select(Method, performanceMetric, mean.info, setting, sdist, inform, pi0, signal, ntests) %>%
+    tidyr::spread(Method, mean.info) %>%
+    tidyr::gather(Method, mean.info, -performanceMetric, -setting, -sdist, -inform,
+                  -pi0, -signal, -ntests, -qvalue, -bh) %>%
+    dplyr::group_by(Method, performanceMetric) %>%
+    dplyr::summarize(meanGain = mean(mean.info / (bh + qvalue) * 2),
+                     meanRGain = mean(log2(mean.info / (bh + qvalue) * 2)),
+                     sdGainBH = sd(mean.info / bh),
+                     sdGainQ = sd(mean.info / qvalue),
+                     sdGain = sd(mean.info / (bh + qvalue) * 2),
+                     sdRGain = sd(log2(.001 + mean.info / (bh + qvalue) * 2)),
+                     cvGain = sdGain / meanGain) %>%
+    dplyr::ungroup()
+
+## consistency across case studies
+consistency_data <- datres %>%
+    dplyr::filter(Method != "ashq", Method != "fdrreg-t", !is.na(nrej)) %>%
+    dplyr::mutate(prej = (nrej+1) / ntotal) %>%
+    dplyr::select(-rank, -nrej, -ntotal, -nNA) %>%
+    tidyr::spread(Method, prej) %>%
+    tidyr::gather(Method, prej, -casestudy, -dataset, -qvalue, -bh) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(meanGain = mean(prej / (bh + qvalue) * 2, na.rm = TRUE),
+                     meanRGain = mean(log2(prej / (bh + qvalue) * 2), na.rm = TRUE),
+                     sdGainBH = sd(prej / bh, na.rm = TRUE),
+                     sdGainQ = sd(prej / qvalue, na.rm = TRUE),
+                     sdGain = sd(prej / (bh + qvalue) * 2, na.rm = TRUE),
+                     sdRGain = sd(log2(prej / (bh + qvalue) * 2), na.rm = TRUE),
+                     cvGain = sdGain / meanGain) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(performanceMetric = "%reject")
+```
+
+We plot the results as well.
+
+```{r, fig.width = 6, fig.height = 6}
+bind_rows(Sims = consistency_sims, CS = consistency_data, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, sdGain),
+                  performanceMetric = factor(paste0(performanceMetric, " (", analysis, ")")),
+                  performanceMetric = factor(performanceMetric, levels = levels(performanceMetric)[c(2, 3, 1)])) %>%
+    ggplot(aes(x = Method, y = sdGain, color = Method, group = performanceMetric)) +
+    geom_line(aes(linetype = performanceMetric), color = 'black', alpha = 1/2) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("SD of % relative to BH/qvalue") + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Variation across simulations and case studies")
+
+bind_rows(Sims = consistency_sims, CS = consistency_data, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, cvGain),
+                  performanceMetric = factor(paste0(performanceMetric, " (", analysis, ")")),
+                  Metric = factor(performanceMetric, levels = levels(performanceMetric)[c(2, 3, 1)])) %>%
+    ggplot(aes(x = Method, y = cvGain, color = Method, group = Metric)) +
+    geom_line(aes(linetype = Metric), color = 'black', alpha = 1/2) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("CV of % relative to BH/qvalue") + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Variation across simulations and case studies") 
+
+bind_rows(Sims = consistency_sims, CS = consistency_data, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, sdRGain),
+                  performanceMetric = factor(paste0(performanceMetric, " (", analysis, ")")),
+                  performanceMetric = factor(performanceMetric, levels = levels(performanceMetric)[c(2, 3, 1)])) %>% 
+    ggplot(aes(x = Method, y = sdRGain, color = Method, group = performanceMetric)) +
+    geom_line(aes(linetype = performanceMetric), color = 'black', alpha = 1/2) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("SD of log-ratio to BH/qvalue") + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Variation across simulations and case studies")
+```
+
+Additionally, we look at the proportion of times a method performed better than BH and Storey's
+q-value.
+
+```{r}
+## consistency (definition 2) across simulation settings
+consistency2_sims <- simres %>%
+    dplyr::filter(performanceMetric == "TPR", alpha == alpha.thresh,
+                  !grepl("null", setting), sdist != "chisq",
+                  Method != "bonf") %>%
+    dplyr::select(Method, performanceMetric, mean.info, setting, sdist, inform, pi0, signal, ntests) %>%
+    tidyr::spread(Method, mean.info) %>%
+    tidyr::gather(Method, mean.info, -performanceMetric, -setting, -sdist, -inform,
+                  -pi0, -signal, -ntests, -qvalue, -bh) %>%
+    dplyr::group_by(Method, performanceMetric) %>%
+    dplyr::summarize(propBoth = mean(mean.info < pmax(bh, qvalue)),
+                     propBoth95 = mean(mean.info < 0.95 * pmax(bh, qvalue)),
+                     propEither = mean(mean.info < pmin(bh, qvalue)),
+                     propEither95 = mean(mean.info < 0.95 * pmin(bh, qvalue))) %>%
+    dplyr::ungroup()
+
+## consistency (definition 2) across case studies
+consistency2_data <- datres %>%
+    dplyr::filter(Method != "ashq", Method != "fdrreg-t", !is.na(nrej)) %>%
+    dplyr::select(-rank, -ntotal, -nNA) %>%
+    tidyr::spread(Method, nrej) %>%
+    tidyr::gather(Method, nrej, -casestudy, -dataset, -qvalue, -bh) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(propBoth = mean(nrej < pmax(bh, qvalue), na.rm = TRUE),
+                     propBoth95 = mean(nrej < 0.95 * pmax(bh, qvalue), na.rm = TRUE),
+                     propEither = mean(nrej < pmin(bh, qvalue), na.rm = TRUE),
+                     propEither95 = mean(nrej < 0.95 * pmin(bh, qvalue), na.rm = TRUE)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(performanceMetric = "%reject")
+```
+
+We also plot these results for the lowerbound case of out-performing either classical approach (BH or Storey's q-value).
+
+```{r, fig.width = 6, fig.height = 6}
+bind_rows(Sims = consistency2_sims, CS = consistency2_data, .id = "analysis") %>%
+    dplyr::mutate(Method = reorder(Method, propEither)) %>%
+    ggplot(aes(x = Method, y = propEither, color = Method, group = analysis)) +
+    geom_line(aes(linetype = analysis), color = 'black', alpha = 1/2) +
+    geom_point() + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("Percent of settings w/ TPR or #rejections\n of BH/q-value", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Consistency of gains over BH or q-value\nacross simulations and case studies")
+```
+
+## Applicability
+
+Finally, for "applicability" we take a look at the number of times each method was not applied
+in the case studies.
+
+```{r}
+applicability_data <- datres %>%
+    dplyr::group_by(casestudy, Method) %>%
+    dplyr::summarize(meanNA = mean(is.na(nrej))) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(meanNA = mean(meanNA)) %>%
+    dplyr::ungroup()
+dplyr::arrange(applicability_data, meanNA)
+```
+
+We also include data sets where 0 rejections were made by `adapt-glm` as cases where
+the method could not be applied.
+
+```{r}
+applicability_data <- datres %>%
+    dplyr::mutate(nrej = ifelse(nrej == 0 & Method == "adapt-glm", NA, nrej)) %>%
+    dplyr::group_by(casestudy, Method) %>%
+    dplyr::summarize(meanNA = mean(is.na(nrej))) %>%
+    dplyr::group_by(Method) %>%
+    dplyr::summarize(meanNA = mean(meanNA)) %>%
+    dplyr::ungroup()
+dplyr::arrange(applicability_data, meanNA)
+```
+
+# Figures
+
+Figures for the manuscript are also generated.
+
+```{r, fig.width = 10, fig.height = 8}
+p1a <- bind_rows(Yeast = fdrcontrol_yeast, Sims = fdrcontrol_sims, .id = "Study") %>%
+    dplyr::mutate(Method = reorder(Method, pExceeds),
+                  Study = factor(Study, levels = c("Yeast", "Sims"))) %>%
+    ggplot(aes(x = Method, y = pExceeds, color = Method, group = Study)) +
+    geom_line(aes(linetype = Study), color = 'black', alpha = 1/2) +
+    geom_point(size = 3) + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("% settings exceeding nominal FDR", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("FDR Control")
+
+p1b <- bind_rows(Yeast = power_yeast, Sims = power_sims, .id = "Study") %>%
+    dplyr::mutate(Method = reorder(Method, meanRank),
+                  Study = factor(Study, levels = c("Yeast", "Sims"))) %>%
+    ggplot(aes(x = Method, y = meanRank, color = Method, group = Study)) +
+    geom_line(aes(linetype = Study), color = 'black', alpha = 1/2) +
+    geom_point(size = 3) + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("Mean TPR rank", breaks = 0:10) + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Power")
+
+p1c <- bind_rows(Sims = consistency2_sims, CS = consistency2_data, .id = "Metric") %>%
+    dplyr::mutate(Method = reorder(Method, propEither),
+                  Metric = factor(paste0(Metric, " (", performanceMetric, ")"))) %>%
+    ggplot(aes(x = Method, y = propEither, color = Method, group = Metric)) +
+    geom_line(aes(linetype = Metric), color = 'black', alpha = 1/2) +
+    geom_point(size = 3) + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("% settings w/ metric < classic methods", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Consistency of Gain")
+
+p1d <- bind_rows(Sims = consistency_sims, CS = consistency_data, .id = "Metric") %>%
+    dplyr::mutate(Method = reorder(Method, sdRGain),
+                  Metric = factor(paste0(Metric, " (", performanceMetric, ")")),
+                  Metric = factor(Metric, levels = levels(Metric)[c(1, 3, 2)])) %>%
+    ggplot(aes(x = Method, y = sdRGain, color = Method, group = Metric)) +
+    geom_line(aes(linetype = Metric), color = 'black', alpha = 1/2) +
+    geom_point(size = 3) + 
+    scale_color_manual(values = col, guide = FALSE) +
+    scale_x_discrete(NULL) + 
+    scale_y_continuous("SD of log-ratio relative to classic methods") + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 10),
+          plot.title = element_text(face = "bold", size = 14)) +
+    ggtitle("Relative Consistency")
+
+p1title <- ggdraw() +
+    draw_label("Summary Recommendation Metrics",
+               fontface = 'bold')
+
+p1ab <- plot_grid(p1a + guides(linetype = FALSE),
+                  p1b + guides(linetype = FALSE),
+                  labels = LETTERS[1:2], nrow = 1)
+p1ab <- plot_grid(p1ab, get_legend(p1a), nrow = 1, rel_widths = c(1, .2))
+
+p1cd <- plot_grid(p1c + guides(linetype = FALSE),
+                  p1d + guides(linetype = FALSE),
+                  labels = LETTERS[3:4], nrow = 1)
+p1cd <- plot_grid(p1cd, get_legend(p1d), nrow = 1, rel_widths = c(1, .2))
+
+FigS <- plot_grid(p1title, p1ab, p1cd, ncol = 1, rel_heights = c(.2, 1, 1))
+FigS
+
+ggsave(file.path(outdir, "SFigureMetrics.pdf"), width=10, height=8)
+```
+
+Additionally, we consider creating the above plot with a common x-axis.
+
+```{r, fig.width = 10, fig.height = 8}
+#consistency_order <- c("bh", "qvalue", "bl", "ihw", "lfdr", "fdrreg-t", "ashq", "adapt-glm", "adapt-gmm")
+consistency_order <- c("bh", "qvalue", "bl", "ihw", "lfdr", "fdrreg-t", "ashq", "adapt-glm", "gmm")
+p2a <- bind_rows(Yeast = fdrcontrol_yeast, Sims = fdrcontrol_sims, .id = "Study") %>%
+    dplyr::mutate(Method = reorder(Method, pExceeds),
+                  Study = factor(Study, levels = c("Yeast", "Sims"))) %>%
+    dplyr::mutate(Method = recode(Method,'adapt-gmm'='gmm')) %>%
+    ggplot(aes(x = Method, y = pExceeds, color = Study, group = Study)) +
+    geom_point(size = 3, position = position_dodge(width = 1/4)) + 
+    scale_color_brewer(palette = "Set2") + 
+    scale_x_discrete(NULL, limits = consistency_order) + 
+    scale_y_continuous("% settings exceeding nominal FDR", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 16),
+          plot.title = element_text(face = "bold", size = 22),
+          axis.text.x = element_text(size=14),
+          axis.text.y = element_text(size=14)) +
+    ggtitle("FDR Control")
+
+p2b <- bind_rows(Yeast = power_yeast, Sims = power_sims, .id = "Study") %>%
+    dplyr::mutate(Method = reorder(Method, meanRank),
+                  Study = factor(Study, levels = c("Yeast", "Sims"))) %>%
+  dplyr::mutate(Method = recode(Method,'adapt-gmm'='gmm')) %>%
+    ggplot(aes(x = Method, y = meanRank, color = Study, group = Study)) +
+    geom_point(size = 3, position = position_dodge(width = 1/4)) + 
+    scale_color_brewer(palette = "Set2") + 
+    scale_x_discrete(NULL, limits = consistency_order) + 
+    scale_y_continuous("Mean TPR rank", breaks = 0:10) + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 16),
+          plot.title = element_text(face = "bold", size = 22),
+          axis.text.x = element_text(size=14),
+          axis.text.y = element_text(size=14)) +
+    ggtitle("Power")
+
+p2c <- bind_rows(Sims = consistency2_sims, CS = consistency2_data, .id = "Metric") %>%
+    dplyr::mutate(Method = reorder(Method, propEither),
+                  Metric = factor(paste0(Metric, " (", performanceMetric, ")"))) %>%
+  dplyr::mutate(Method = recode(Method,'adapt-gmm'='gmm')) %>%
+    ggplot(aes(x = Method, y = propEither, color = Metric, group = Metric)) +
+    geom_point(size = 3, position = position_dodge(width = 1/4)) +
+    scale_color_brewer(palette = "Set1") + 
+    scale_x_discrete(NULL, limits = consistency_order) + 
+    scale_y_continuous("% settings w/ metric < classic methods", labels = scales::percent) + 
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 16),
+          plot.title = element_text(face = "bold", size = 22),
+          axis.text.y = element_text(size=14),
+          axis.text.x = element_text(size=14)) +
+    ggtitle("Consistency of Gain")
+
+p2d <- bind_rows(Sims = consistency_sims, CS = consistency_data, .id = "Metric") %>%
+    dplyr::mutate(Method = reorder(Method, sdRGain),
+                  Metric = factor(paste0(Metric, " (", performanceMetric, ")")),
+                  Metric = factor(Metric, levels = levels(Metric)[c(1, 3, 2)])) %>%
+  dplyr::mutate(Method = recode(Method,'adapt-gmm'='gmm')) %>%
+    ggplot(aes(x = Method, y = sdRGain, color = Metric, group = Metric)) +
+    geom_point(size = 3, position = position_dodge(width = 1/4)) + 
+    scale_color_brewer(palette = "Set1") + 
+    scale_x_discrete(NULL, limits = consistency_order) + 
+    scale_y_continuous("SD of log-ratio relative to classic methods") + 
+    expand_limits(y = 1) +
+    theme_classic() +
+    theme(axis.title = element_text(face = "bold", size = 16),
+          plot.title = element_text(face = "bold", size = 22),
+          axis.text.y = element_text(size=14),
+          axis.text.x = element_text(size=14)) +
+    ggtitle("Relative Consistency")
+
+p2title <- ggdraw() +
+    draw_label("Korthauer et al.'s Summary Recommendation Metrics (Lower is Better)",
+               fontface = 'bold',size = 22)
+
+p2ab <- plot_grid(p2a + guides(color = FALSE),
+                  p2b + guides(color = FALSE),
+                  labels = LETTERS[1:2], nrow = 1)
+p2ab <- plot_grid(p2ab, get_legend(p2a), nrow = 1, rel_widths = c(1, .1))
+
+p2cd <- plot_grid(p2c + guides(color = FALSE),
+                  p2d + guides(color = FALSE),
+                  labels = LETTERS[3:4], nrow = 1)
+p2cd <- plot_grid(p2cd, get_legend(p2d), nrow = 1, rel_widths = c(1, .1))
+
+FigS2 <- plot_grid(p2title, p2ab, p2cd, ncol = 1, rel_heights = c(.2, 1, 1))
+FigS2
+
+ggsave(file.path(outdir, "Figure5.pdf"), width=16, height=11)
+```

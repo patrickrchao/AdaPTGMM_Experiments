@@ -1,0 +1,220 @@
+---
+title: "Simulation Summary Figures"
+author: "Patrick Kimes"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-workspace}
+# Load packages and source benchmark FDR
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(cowplot)
+library(tibble)
+library(ggthemes)
+library(grid)
+library(SummarizedBenchmark)
+
+
+if(packageVersion("SummarizedBenchmark") != "0.99.2"){
+  stop("Summarized Benchmark version is incorrect, please run 'devtools::install_github('areyesq89/SummarizedBenchmark', ref = 'fdrbenchmark')'.")
+}
+## load helper functions
+for (f in list.files("../R/", "\\.(r|R)$", full.names = TRUE)) {
+    source(f)
+}
+
+# set up results directory
+outdir <- "../figures"
+dir.create(outdir, showWarnings = FALSE)
+result_summary_dir <- "./results-summary"
+dir.create(result_summary_dir, showWarnings = FALSE)
+
+gmm_results_dir <- "./results"
+original_results_dir <- "./data_files"
+
+resmet_file <- file.path(result_summary_dir, "result-metrics.rds")
+
+resmet_gmm_file <- file.path(result_summary_dir, "gmm-result-metrics.rds")
+
+
+methodset <- c("bonf", "bh", "ihw", "qvalue", "bl-df03", "lfdr",
+               "fdrreg-e", "fdrreg-t", "ashq", "adapt-glm","adapt-gmm")
+```
+
+# Data Preparation
+
+First, we load summaries for all simulations results at significance thresholds
+between 0.01 and 0.10. This process can take a long time (approximately 40 minutes
+per alpha cutoff) because of the large number of simulation settings that must be
+read in and summarized. Ideally, this initial step should be run externally separate
+from this Rmd (by default, the following code chunk will not be run).
+
+```{r, eval = FALSE}
+for (ia in 1:1) {
+    summary_file <- file.path(result_summary_dir,paste0("summary_alpha", ia, ".rds"))
+    if (!file.exists(summary_file)) {
+        res_files <- list.files(original_results_dir, "\\.rds$", full.names = TRUE)
+        res <- lapply(res_files, function(x) {
+            zz <- readRDS(x)
+            zz_i <- lapply(zz, `[[`, "informative")
+            zz_u <- lapply(zz, `[[`, "uninformative")
+            zz_i <- plotsim_standardize(zz_i, alpha = ia / 100L)
+            zz_i <- dplyr::select(zz_i, rep, blabel, param.alpha, key, performanceMetric, alpha, value)
+            zz_i <- dplyr::select(zz_i, rep, label, alpha, key, performanceMetric, alpha, value)
+            zz_u <- plotsim_standardize(zz_u, alpha = ia / 100L)
+            zz_u <- dplyr::select(zz_u, rep, blabel, param.alpha, key, performanceMetric, alpha, value)
+            dplyr::full_join(zz_i, zz_u,
+                             by = c("rep", "blabel", "param.alpha", "key", "performanceMetric", "alpha"),
+                             suffix = c(".info", ".uninfo"))
+        })
+        names(res) <- gsub("\\.rds$", "", basename(res_files))
+        saveRDS(res, summary_file)
+    }
+}
+```
+
+For new results files
+
+```{r, eval = FALSE}
+# can run this here
+# alternatively, if this is too slow, can run "generate_alpha_summary.sh"
+# can run this in parallel for speed increase
+for (ia in 10) {
+    print(ia)
+  summary_file <- file.path(result_summary_dir,paste0("gmm_summary_alpha", ia, ".rds"))
+    if (!file.exists(summary_file)) {
+       res_files <- list.files(gmm_results_dir, "\\.rds$", full.names = TRUE)
+                    
+        #res_files <- list.files("results", "\\.rds$", full.names = TRresUE)
+        res <- lapply(res_files, function(x) {
+            cat(paste(x,"\n"))
+            zz <- readRDS(x)
+            zz_i <- lapply(zz, `[[`, "informative")
+            zz_u <- lapply(zz, `[[`, "uninformative")
+            zz_i <- plotsim_standardize(zz_i, alpha = ia / 100L)
+            zz_i <- dplyr::select(zz_i, rep, label,  performanceMetric, alpha, value)
+            zz_u <- plotsim_standardize(zz_u, alpha = ia / 100L)
+            zz_u <- dplyr::select(zz_u, rep, label,  performanceMetric, alpha, value)
+            dplyr::full_join(zz_i, zz_u,
+                            by = c("rep", "label", "performanceMetric", "alpha"),
+                            suffix = c(".info", ".uninfo"))
+        })
+        names(res) <- gsub("\\.rds$", "", basename(res_files))
+        saveRDS(res, summary_file)
+    }
+}
+```
+
+Assuming that the summaries have been saved for all simulation settings at
+the various FDR thresholds using the code above, we load the summarized results
+and merge them into a single results table.
+
+```{r}
+# alphas <- 1:10
+# res <- vector("list", length(alphas))
+# for (ia in seq_len(length(alphas))) {
+#     print(ia)
+#     imethodset <- methodset
+#     imethodset[which(imethodset == "ihw")] <- paste0("ihw-a", sprintf("%02d", alphas[ia]))
+#     ires <- readRDS(file.path(result_summary_dir, paste0("gmm_summary_alpha", alphas[ia], ".rds")))
+#     ires <- bind_rows(ires, .id = "setting")
+#     ires <- dplyr::mutate(ires, dist = gsub(".*?-benchmark-(.*)", "\\1", setting),
+#                          setting = gsub("(.*?)-benchmark-.*", "\\1", setting))
+#     ires <- dplyr::filter(ires, blabel %in% imethodset)
+#     ires <- dplyr::mutate(ires, blabel = gsub("(-a)(.*)", "", blabel))
+#     res[[ia]] <- ires
+# }
+# res <- bind_rows(res)
+# res <- dplyr::select(res, -param.alpha)
+# res <- dplyr::rename(res, Method = blabel)
+# res <- dplyr::mutate(res, Method = gsub("-df03", "", Method))
+# #res <- dplyr::mutate(res, Method = factor(Method, levels = gsub("-df03", "", methodset)))
+```
+
+Run this for add new methods
+```{r}
+alphas <- 1:10
+gmm_res <- vector("list", length(alphas))
+gmmmethodset <- c("AdaPTGMM")
+for (ia in seq_len(length(alphas))) {
+    print(ia)
+    full_methodset <- c(methodset,gmmmethodset)
+    ires <-  readRDS(file.path(result_summary_dir, paste0("gmm_summary_alpha", alphas[ia], ".rds")))
+    ires <- bind_rows(ires, .id = "setting")
+    ires <- dplyr::mutate(ires, dist = gsub(".*?-benchmark-(.*)", "\\1", setting),
+                         setting = gsub("(.*?)-benchmark-.*", "\\1", setting))
+    ires <- dplyr::filter(ires, label %in% full_methodset)
+    ires <- dplyr::mutate(ires, label = gsub("(-a)(.*)", "", label))
+    gmm_res[[ia]] <- ires
+}
+gmm_res <- bind_rows(gmm_res)
+gmm_res <- dplyr::rename(gmm_res, Method = label)
+gmm_res <- dplyr::mutate(gmm_res, Method = gsub("-df03", "", Method))
+#gmm_res <- dplyr::mutate(gmm_res, Method = factor(Method, levels = gsub("-df03", "", methodset)))
+``` 
+ 
+
+
+
+# Augmented version Patrick
+```{r}
+
+resmet <- dplyr::mutate(gmm_res, value.info = ifelse(is.na(value.info), 0, value.info),
+                        value.uninfo = ifelse(is.na(value.uninfo), 0, value.uninfo))
+resmet <- dplyr::group_by(resmet, setting, dist, Method, performanceMetric, alpha)
+resmet <- dplyr::summarize(resmet,
+                           mean.info = mean(value.info, na.rm = TRUE),
+                           se.info = sd(value.info, na.rm = TRUE) / sqrt(sum(!is.na(value.info))),
+                           nNA.info = sum(is.na(value.info)),
+                           mean.diff = mean(value.info - value.uninfo, na.rm = TRUE),
+                           se.diff = sd(value.info - value.uninfo, na.rm = TRUE) /
+                               sqrt(sum(!is.na(value.info - value.uninfo))))
+resmet <- dplyr::ungroup(resmet)
+
+resmet <- dplyr::mutate(resmet, inform = ifelse(grepl("varyinginfo", setting), dist, NA))
+resmet <- dplyr::mutate(resmet, inform = as.numeric(gsub("level", "", inform)))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("varyinginfo", setting), "gaussian", dist))
+
+resmet <- dplyr::mutate(resmet, pi0 = ifelse(grepl("varyingpi0", setting), dist, 90))
+resmet <- dplyr::mutate(resmet, pi0 = as.numeric(gsub("nullprop", "", pi0)))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("^varyingpi0$", setting), "gaussian", dist))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("^varyingpi0-t$", setting), "t11", dist))
+
+resmet <- dplyr::mutate(resmet, signal = ifelse(grepl("uasettings", setting), dist, NA))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("^uasettings$", setting), "gaussian", dist))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("^uasettings-t$", setting), "t11", dist))
+resmet <- dplyr::mutate(resmet, setting = ifelse(grepl("uasettings", setting), "uasettings", setting))
+
+resmet <- dplyr::mutate(resmet, pi0 = ifelse(grepl("varyingntests", setting), 90, pi0))
+resmet <- dplyr::mutate(resmet, ntests = ifelse(grepl("varyingntests", setting), dist, "n20000"))
+resmet <- dplyr::mutate(resmet, ntests = as.numeric(gsub("n", "", ntests)))
+resmet <- dplyr::mutate(resmet, dist = ifelse(grepl("varyingntests", setting), "gaussian", dist))
+
+
+resmet <- dplyr::mutate(resmet, dist = factor(dist, levels = c("gaussian", "t11", "t5", "chisq4"),
+                                              labels = c(expression("Distribution: " * N(0, 1)),
+                                                         expression("Distribution: " * t[11]),
+                                                         expression("Distribution: " * t[5]),
+                                                         expression("Distribution: " * {chi^2}[4]))))
+
+
+resmet <- dplyr::filter(resmet, !( grepl("chi", dist) & Method == "ashq" ))
+resmet <- dplyr::filter(resmet, !( grepl("chi", dist) & grepl("fdrreg", Method) ))
+
+
+resmet_file <- file.path(result_summary_dir, "gmm-result-metrics.rds")
+
+saveRDS(resmet, file = resmet_file)
+
+```

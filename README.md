@@ -1,1 +1,1 @@
-# AdaPTGMM_Experiments
+# Experiments for AdaPTGMM Paper

@@ -1,0 +1,464 @@
+---
+title: "Case study: Genome-Wide Association Analyses (GWAS)"
+author: "Keegan Korthauer"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+   html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        number_sections: true
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Summary
+
+Here we will make use of the `SummarizedBenchmark` package to benchmark a 
+Genome-Wide Association Study (GWAS) dataset. We will examine a GWAS 
+meta-analysis for Body Mass Index (BMI), which was also included in the 
+Boca-Leek manuscript.
+
+# Workspace setup
+
+This analysis requires that the software PLINK (version 1.9) 
+is installed on your system.
+PLINK is freely available for download 
+[here](http://zzz.bwh.harvard.edu/plink/plink2.shtml).
+
+```{r, wkspace-setup, results='hide', message=FALSE, warning=FALSE}
+library(data.table)
+library(readxl)
+library(readr)
+library(dplyr)
+library(BiocParallel)
+
+## load helper functions
+for (f in list.files("../R", "\\.(r|R)$", full.names = TRUE)) {
+    source(f)
+}
+
+# data and results directories
+datdir <- "./data_files/"
+resdir <- "results"
+sbdir <- "./output_files/"
+dir.create(datdir, showWarnings = FALSE)
+dir.create(resdir, showWarnings = FALSE)
+dir.create(sbdir, showWarnings = FALSE)
+
+
+
+# set up parallel backend
+cores <- 8
+multicoreParam <- MulticoreParam(workers = cores)
+```
+
+# Data preparation
+
+We'll first download the GWAS summary statistics dataset from the 
+GIANT consortium data portal.
+
+## Data download
+
+After downloading, we unzip the file, and delete the files we won't use (they provide results
+subsetted by ancestry and sex), keeping only the file with European ancestry and
+both sexes `BMI.SNPadjSMK.CombinedSexes.EuropeanOnly.txt`. Note that
+the Boca-Leek paper also used the 'EuropeanOnly' subset, likely because using 
+all ancestries would require that we assess the impact of population stratification
+and adjust for it if present. For simplicity, we follow suit and use the homogeneous 
+subset to avoid the impact of population stratification on our results.
+
+
+```{r, GWAS1-download}
+if (!file.exists(file.path(datdir, "BMI.SNPadjSMK.CombinedSexes.EuropeanOnly.txt"))) {
+  download.file(url = "http://portals.broadinstitute.org/collaboration/giant/images/3/3a/BMI.SNPadjSMK.zip", 
+             destfile = file.path(datdir, "BMI.SNPadjSMK.zip")) 
+  unzip(file.path(datdir, "BMI.SNPadjSMK.zip"), exdir = datdir)
+  file.remove(file.path(datdir,"BMI.SNPadjSMK.zip"))
+  
+  dfiles <- list.files(path = datdir, pattern = "BMI.SNPadjSMK.*.txt", 
+                       full.names = TRUE)
+  dfiles <- dfiles[!grepl("BMI.SNPadjSMK.CombinedSexes.EuropeanOnly.txt", dfiles)]
+  file.remove(dfiles)
+}
+```
+
+We also download the 1000 genomes CEU reference population data, which will be used to 
+determine which SNPs are LD buddies for the purposes of obtaining an independent set of SNPs.
+
+```{r, GWAS1-refdata}
+reffile <- file.path(datdir, "1000G_20101123_v3_GIANT_chr1_23_minimacnamesifnotRS_CEU_MAF0.01")
+if (!file.exists(paste0(reffile, ".fam"))) {
+    download.file("http://neurogenetics.qimrberghofer.edu.au/iSECA/1000G_20101123_v3_GIANT_chr1_23_minimacnamesifnotRS_CEU_MAF0.01.zip", 
+                  destfile = paste0(reffile, ".zip"))
+    unzip(paste0(reffile, ".zip"), exdir = datdir)
+    file.remove(paste0(reffile, ".zip"))
+}
+```
+
+Next, we'll read in the unzipped `.txt` file into R and verify that it contains
+the necessary inputs to run the FDR benchmark comparisons.
+
+```{r, GWAS1-verify-contents}
+bmi <- fread(file.path(datdir, "BMI.SNPadjSMK.CombinedSexes.EuropeanOnly.txt"),
+             header = TRUE)
+dim(bmi)
+head(bmi)
+```
+
+It looks like we have:
+  
+- `p_value`:p-value
+- `effect`:effect size
+- `stderr`:standard error
+- additional covariates: 
+  - `N`: Number of samples with this SNP - BMI association measured
+- `Freq_Allele1_HapMapCEU`: Allele Frequency of Allele1, as measured in HapMapCEU
+
+for `r nrow(bmi)` SNPs.
+
+## Prune SNPs that are in Linkage Disequilibrium
+
+Since nearby SNPs in linkage disequilibrium may not constitute separate discoveries, we carry out 
+a pruning step. This commonly done by examining correlation of genotypes among nearby markers, but
+since we don't have the genotype data, we'll use the linkage disequilibrium results of common SNPs and 
+previously observed LD blocks. Specifically, we'll use the phase 3 data from 1000 genomes, restricted
+to the CEU population (since this most closely matches our population of European ancestry). This 
+reference data was downloaded in a previous code chunk. Here we read in the list of more than
+9 million SNPs with data in 1000 genomes and create a list of SNPs that overlap our set. We'll write 
+this list to a file that matches PLINK format.
+
+```{r, GWAS1-snplist, eval=TRUE}
+# load reference data 
+onekg <- fread(file.path(datdir,  "1000G_20101123_v3_GIANT_chr1_23_minimacnamesifnotRS_CEU_MAF0.01.bim"))$V2
+
+# construct input list of SNPs that overlap - 97.5% overlap
+bmi$BP <- as.numeric(unlist(lapply(strsplit(bmi$markername, ":"), function(x) x[[2]])))
+write_delim(bmi %>%
+            dplyr::rename(CHR=chromosome, SNP=rs_id, A1=allele_1, A2=allele_2) %>%
+            mutate(P=0.5, F_A=Freq_Allele1_HapMapCEU, F_U=F_A, CHISQ=1, OR=1) %>% 
+            select(CHR, SNP, BP, A1, F_A, F_U, A2, CHISQ, P, OR) %>%
+            filter(SNP %in% onekg), 
+            path=file.path(datdir,  "rslist.assoc"), delim="\t")
+
+ol <- sum(bmi$rs_id %in% onekg)/nrow(bmi)
+rm(onekg)
+```
+
+It turns out that `r signif(ol*100, 3)` percent of SNPs in our set are included in the 1000 genomes 
+reference data. Next we'll use the PLINK software to read in our list of SNPs and the 1000 genomes
+linkage disequilibrium data to 'clump' the SNPs into independent sets of SNPs that have LD correlation (r squared)
+less than 0.2 with all neighbors within 250 kilobases of distance. We write the results to a file called `plink_clump.clumped`. We have to jump out of R here since PLINK is a command line tool.
+
+# Can download PLINK from here: https://www.cog-genomics.org/plink/1.9/
+```{r, clump}
+## use PLINK clumping tool to obtain a set of independent SNPs by LD
+if (!file.exists(file.path(datdir, "plink_clump.clumped"))) {
+    code <- paste("./plink",
+                  "--bfile", file.path(datdir, "1000G_20101123_v3_GIANT_chr1_23_minimacnamesifnotRS_CEU_MAF0.01"),
+                  "--clump", file.path(datdir, "rslist.assoc"),
+                  "--clump-field P",
+                  "--clump-p1 0.9999",
+                  "--clump-p2 0.9999",
+                  "--clump-r2 0.2",
+                  "--clump-kb 250",
+                  "--out", file.path(datdir, "plink_clump"))
+    system(code)
+get}
+```
+
+Next, we'll read in the clumped results and subset our data by our list of independent SNPs.
+
+```{r, GWAS1-prune}
+clump <- fread(file.path(datdir, "plink_clump.clumped"))
+
+# subset to include only the SNPs in the ld.list
+bmi <- bmi[bmi$rs_id %in% clump$SNP, ]
+
+rm(clump)
+```
+
+After pruning, we are left with for `r nrow(bmi)` approximately independent SNPs.
+
+Before moving on, we'll rename the relevant columns so that they will use common terms
+across the different datasets. We'll also add a 'test_statistic' column.
+
+```{r, GWAS1-reformat}
+bmi <- bmi %>% 
+    dplyr::rename(pval = p_value,
+                  SE = stderr,
+                  effect_size = effect,
+                  ind_covar_N = N,
+                  ind_covar_AF = Freq_Allele1_HapMapCEU) %>%
+    mutate(test_statistic = effect_size / SE) %>%
+    select(pval, SE, effect_size, ind_covar_N, ind_covar_AF, test_statistic) 
+saveRDS(bmi,"data_files/bmi.rds")
+```
+
+
+<!-- # Data Analysis -->
+
+<!-- ## Differential Testing -->
+<!-- Since we do not have access to the individual genotype information and since -->
+<!-- our data already contains the results of performing hypothesis tests of -->
+<!-- association of BMI with each SNP (including p-values and effect sizes), we  -->
+<!-- don't need to carry out any additional testing. We move on to checking the -->
+<!-- covariate diagnostics and adjusting for multiple comparisons. -->
+
+<!-- ## Multiple-Testing Correction -->
+
+<!-- First, we'll create an object of `BenchDesign` class to hold the data and  -->
+<!-- add the benchmark methods to the `BenchDesign` object. -->
+
+<!-- ```{r, GWAS1-benchdesign, message=FALSE} -->
+<!-- bd <- initializeBenchDesign() -->
+<!-- ``` -->
+
+<!-- We also add in Scott's FDR Regression (both -->
+<!-- `nulltype = "empirical"` and `nulltype = "theoretical"`) -->
+<!-- since our test statistics are t-distributed.  -->
+
+<!-- ```{r} -->
+<!-- bd <- addBMethod(bd, "fdrreg-t", -->
+<!--                      FDRreg::FDRreg, -->
+<!--                      function(x) { x$FDR }, -->
+<!--                      z = test_statistic, -->
+<!--                      features = model.matrix( ~  splines::bs(ind_covariate, df = 3) - 1), -->
+<!--                      nulltype = 'theoretical', -->
+<!--                      control = list(lambda = 0.01)) -->
+<!-- bd <- addBMethod(bd, "fdrreg-e", -->
+<!--                      FDRreg::FDRreg, -->
+<!--                      function(x) { x$FDR }, -->
+<!--                      z = test_statistic, -->
+<!--                      features = model.matrix( ~  splines::bs(ind_covariate, df = 3) - 1), -->
+<!--                      nulltype = 'empirical', -->
+<!--                      control = list(lambda = 0.01)) -->
+
+<!-- # library(devtools) -->
+<!-- #  -->
+<!-- # load_all("~/statistics_research/AdaPTGMM") -->
+<!-- # new_method <- addBDMethod(bd, "AdaPTGMM",  -->
+<!-- #                        adapt_gmm,post = function(x){x$qvals}, -->
+<!-- #                        pvals=pval, x= data.frame(icov=ind_covariate), -->
+<!-- #                             beta_formulas = paste0("splines::ns(icov, df = ", seq(2,8,2), ")") -->
+<!-- #                        ) -->
+<!-- ``` -->
+
+<!-- Now, we're ready to construct the `SummarizedBenchmark` object, which will run -->
+<!-- the functions specified in each method (these are actually sourced in from the -->
+<!--                                         helper scripts).  -->
+
+<!-- ### Covariate one: Sample size -->
+
+<!-- First we'll include the sample size covariate. -->
+
+<!-- ```{r, GWAS1-sb, results="hide", message=FALSE} -->
+<!-- duration <- NA -->
+<!-- if (!file.exists(resfile_N)) { -->
+<!--     t1 <- proc.time() -->
+<!--     sbN <- bd %>% buildBench(data=(bmi %>% mutate(ind_covariate=ind_covar_N)),  -->
+<!--                              ftCols = c("ind_covar_N", "effect_size"), -->
+<!--                              parallel=TRUE, BPPARAM=multicoreParam) -->
+<!--     metadata(sbN)$data_download_link <-  -->
+<!--                     "http://portals.broadinstitute.org/collaboration/giant/images/3/3a/BMI.SNPadjSMK.zip" -->
+<!--     saveRDS(sbN, file = resfile_N) -->
+<!--     duration <- round((proc.time()-t1)[3]/60,1) -->
+<!-- } else { -->
+<!--     sbN <- readRDS(resfile_N) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- if (!is.na(duration)) { -->
+<!--   message("This step took ", duration, " minutes for ", nrow(bmi), " SNPs using ", -->
+<!--           cores, " cores.") -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ### Covariate two: Minor Allele Frequency -->
+
+<!-- Now, we'll repeat the multiple testing correction using the other covariate (AF): -->
+
+<!-- ```{r, GWAS1-sb2, results="hide", message=FALSE} -->
+<!-- duration <- NA -->
+<!-- if (!file.exists(resfile_AF)) { -->
+<!--     t1 <- proc.time() -->
+<!--     sbAF <- bd %>% buildBench(data=(bmi %>% mutate(ind_covariate=ind_covar_AF) %>% -->
+<!--                                     filter(!is.na(ind_covariate))),  -->
+<!--                               ftCols = c("ind_covar_AF", "effect_size"), -->
+<!--                               parallel=TRUE, BPPARAM=multicoreParam) -->
+<!--     metadata(sbAF)$data_download_link <-     -->
+<!--                      "http://portals.broadinstitute.org/collaboration/giant/images/3/3a/BMI.SNPadjSMK.zip" -->
+<!--     saveRDS(sbAF, file = resfile_AF) -->
+<!--     duration <- round((proc.time()-t1)[3]/60, 1) -->
+<!-- } else { -->
+<!--     sbAF <- readRDS(resfile_AF) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- if (!is.na(duration)) { -->
+<!--     message("This step took ", duration, " minutes for ", nrow(bmi), " SNPs using ", -->
+<!--             cores, " cores.") -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ### Covariate three: Random -->
+
+<!-- Now, we'll repeat the multiple testing correction using the other covariate (random): -->
+
+<!-- ```{r, GWAS1-sb3, results="hide", message=FALSE} -->
+<!-- duration <- NA -->
+<!-- if (!file.exists(resfile_uninf)) { -->
+<!--     t1 <- proc.time() -->
+<!--     sbU <- bd %>% buildBench(data=(bmi %>% mutate(ind_covariate=ind_covar_uninf) %>% -->
+<!--                                     filter(!is.na(ind_covariate))),  -->
+<!--                               ftCols = c("ind_covar_uninf", "effect_size"), -->
+<!--                               parallel=TRUE, BPPARAM=multicoreParam) -->
+<!--     metadata(sbU)$data_download_link <-     -->
+<!--                      "http://portals.broadinstitute.org/collaboration/giant/images/3/3a/BMI.SNPadjSMK.zip" -->
+<!--     saveRDS(sbU, file = resfile_uninf) -->
+<!--     duration <- round((proc.time()-t1)[3]/60, 1) -->
+<!-- } else { -->
+<!--     sbU <- readRDS(resfile_uninf) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- if (!is.na(duration)) { -->
+<!--     message("This step took ", duration, " minutes for ", nrow(bmi), " SNPs using ", -->
+<!--             cores, " cores.") -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ## Benchmark Metrics -->
+
+<!-- Next, we'll add the default performance metric for q-value assays and  -->
+<!-- plot the results. We'll start with covariate one. -->
+
+<!-- ### Covariate one: Sample Size -->
+
+<!-- First, we have -->
+<!-- to rename the assay to 'qvalue'. -->
+
+<!-- ```{r, GWAS1-metrics} -->
+<!-- # rename assay to qvalue -->
+<!-- assayNames(sbN) <- "qvalue" -->
+<!-- sbN <- addDefaultMetrics(sbN) -->
+<!-- ``` -->
+
+<!-- Now, we'll plot the results. -->
+
+<!-- ```{r, GWAS1-plot, results="hide"} -->
+<!-- # plot nrejects by method overall and stratified by covariate -->
+<!-- rejections_scatter(sbN, supplementary=FALSE) + -->
+<!--     ggtitle("Covariate 1: Sample size") -->
+
+<!-- rejection_scatter_bins(sbN, covariate="ind_covar_N", bins=4, -->
+<!--                        supplementary=FALSE) + -->
+<!--     ggtitle("Covariate 1: Sample size") -->
+
+<!-- # upset plot  -->
+<!-- plotFDRMethodsOverlap(sbN,  -->
+<!--                       alpha=0.05, nsets=ncol(sb), -->
+<!--                       order.by="freq", decreasing=TRUE, -->
+<!--                       supplementary=FALSE)  -->
+<!-- ``` -->
+
+
+<!-- ```{r, fig.width=8, fig.height=3.5} -->
+<!-- covariateLinePlot(sbN, alpha=0.05, covname="effect_size", nbins=25,  -->
+<!--                  trans="log1p") -->
+<!-- covariateLinePlot(sbN, alpha=0.05, covname="ind_covar_N", nbins=25,  -->
+<!--                  trans="log1p") -->
+<!-- ``` -->
+
+<!-- ### Covariate two: Minor Allele Frequency -->
+
+<!-- Next, we'll look at the performance metrics for the other covariate (minor -->
+<!-- allele frequency). -->
+
+<!-- ```{r, GWAS1-metrics2} -->
+<!-- # rename assay to qvalue -->
+<!-- assayNames(sbAF) <- "qvalue" -->
+<!-- sbAF <- addDefaultMetrics(sbAF) -->
+<!-- ``` -->
+
+<!-- Now, we'll plot the results. -->
+
+<!-- ```{r, GWAS1-plot2, results="hide"} -->
+<!-- # plot nrejects by method overall and stratified by covariate -->
+<!-- rejections_scatter(sbAF, supplementary=FALSE) + -->
+<!--   ggtitle("Covariate 2: Minor allele frequency") -->
+
+<!-- rejection_scatter_bins(sbAF, covariate="ind_covar_AF", bins=4, -->
+<!--                        supplementary=FALSE) + -->
+<!--   ggtitle("Covariate 2: Minor allele frequency") -->
+
+<!-- # upset plot  -->
+<!-- plotFDRMethodsOverlap(sbAF,  -->
+<!--                       alpha=0.05, nsets=ncol(sbAF), -->
+<!--                       order.by="freq", decreasing=TRUE, -->
+<!--                       supplementary=FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r, fig.width=8, fig.height=3.5} -->
+<!-- covariateLinePlot(sbAF, alpha=0.05, covname="effect_size", nbins=25,  -->
+<!--                  trans = "log1p") -->
+<!-- covariateLinePlot(sbAF, alpha=0.05, covname="ind_covar_AF", nbins=25) -->
+<!-- ``` -->
+
+<!-- ### Covariate three: Random -->
+
+<!-- Next, we'll look at the performance metrics for the other covariate (random). -->
+
+<!-- ```{r, GWAS1-metrics3} -->
+<!-- # rename assay to qvalue -->
+<!-- assayNames(sbU) <- "qvalue" -->
+<!-- sbU <- addDefaultMetrics(sbU) -->
+<!-- ``` -->
+
+<!-- Now, we'll plot the results. -->
+
+<!-- ```{r, GWAS1-plot3, results="hide"} -->
+<!-- # plot nrejects by method overall and stratified by covariate -->
+<!-- rejections_scatter(sbU, supplementary=FALSE) + -->
+<!--   ggtitle("Covariate 3: Random") -->
+
+<!-- rejection_scatter_bins(sbU, covariate="ind_covar_uninf", bins=4, -->
+<!--                        supplementary=FALSE) + -->
+<!--   ggtitle("Covariate 3: Random") -->
+
+<!-- # upset plot  -->
+<!-- plotFDRMethodsOverlap(sbU,  -->
+<!--                       alpha=0.05, nsets=ncol(sbAF), -->
+<!--                       order.by="freq", decreasing=TRUE, -->
+<!--                       supplementary=FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r, fig.width=8, fig.height=3.5} -->
+<!-- covariateLinePlot(sbU, alpha=0.05, covname="effect_size", nbins=25,  -->
+<!--                  trans = "log1p") -->
+<!-- covariateLinePlot(sbU, alpha=0.05, covname="ind_covar_uninf", nbins=25) -->
+<!-- ``` -->
+
+
+<!-- # Covariate comparison -->
+
+<!-- Here we compare the method ranks for the two covariates at alpha = 0.10. -->
+
+<!-- ```{r} -->
+<!-- plotMethodRanks(c(resfile_AF, resfile_N, resfile_uninf),  -->
+<!--                 colLabels = c("MAF", "Sample Size", "Random"),  -->
+<!--                 alpha = 0.10, xlab = "Covariate",  -->
+<!--                 excludeMethods = NULL) -->
+<!-- ``` -->
+
+
+<!-- # Session Information -->
+
+<!-- ```{r} -->
+<!-- sessionInfo() -->
+<!-- ``` -->
