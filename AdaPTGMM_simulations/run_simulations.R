@@ -13,7 +13,7 @@ run_simulations <- function(chosen_methods, num_sim, num_hypo, radius, testing, 
 
   method_subset <- chosen_methods[!(chosen_methods%in% c("AdaFDR"))]
 
-  full_log <- simulation_helper(num_hypo,num_sim,radius,testing,se,alphas,method_subset,num_cores)
+  full_log <- simulation_helper(num_hypo,num_sim,radius,testing,se,alphas,method_subset,num_cores,intervals)
 
   print("Finished methods, now running AdaFDR")
   saveRDS(full_log,paste0("logs/",gsub(" ","_",testing),"_log.RDS"))
@@ -26,7 +26,7 @@ run_simulations <- function(chosen_methods, num_sim, num_hypo, radius, testing, 
   return(full_log)
 }
 
-simulation_helper <- function(num_hypo,num_sim,radius,testing,se,alphas,methods,num_cores){
+simulation_helper <- function(num_hypo,num_sim,radius,testing,se,alphas,methods,num_cores,intervals){
 
   log <- mclapply(1:num_sim,function(x){
     print(paste("Iteration",x,"of",num_sim))
@@ -39,7 +39,7 @@ simulation_helper <- function(num_hypo,num_sim,radius,testing,se,alphas,methods,
     z <- data$z
 
     for(method in methods){
-
+        print(paste("Current method:",method))
         out <- run_method(x=x,z=z,pvals=pvals,se=se,intervals=intervals,
                           method=method,alphas=alphas,h=h,testing=testing)
 

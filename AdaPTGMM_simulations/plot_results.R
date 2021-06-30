@@ -133,7 +133,7 @@ plot_results <- function(full_log,testing){
     return(legend)}
   out <- grid.arrange(arrangeGrob(p1, p3+theme(legend.position="none"),nrow=1),g_legend(p3), nrow = 1,widths=c(6,1.5),
                       top = textGrob(filename_title,gp=gpar(fontsize=30)),padding=unit(1, "line"))
-  file_name <- paste(filename_title,"full_plots",sep="_")
+  file_name <- paste(filename_title,"full plots")
   ggsave(paste0("Images/", file_name, ".pdf"), out, width = 40, height = 15, dpi = 200, units = "cm")
 
 
