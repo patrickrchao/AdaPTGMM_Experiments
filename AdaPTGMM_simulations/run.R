@@ -26,7 +26,7 @@ source('indiv_method_func.R')
 num_hypo <- 3000
 num_sims <- 100
 radius <- 1
-testing <- "two_sided"
+testing <- "interval"
 se <- rep(1,num_hypo)
 # number of cores in parallel processing
 num_cores <- 10
