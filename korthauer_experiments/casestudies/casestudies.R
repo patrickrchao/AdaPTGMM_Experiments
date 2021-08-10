@@ -67,14 +67,17 @@ add_new_metrics_sigma_i <- function(data,cov="ind_covariate"){
   }
   if(cov == "ind_covariate"){
     dat <- tibble(pval = data$pval,
+                  test_statistic = data$test_statistic,
                   covariate = data$ind_covariate,
                   se = data$SE)
   }else if (cov == "samplesize"){
     dat <- tibble(pval = data$pval,
+                  test_statistic = data$test_statistic,
                   covariate = data$ind_covar_N,
                   se = data$SE)
   }else if (cov == "maf"){
     dat <- tibble(pval = data$pval,
+                  test_statistic = data$test_statistic,
                   covariate = data$ind_covar_AF,
                   se = data$SE)
   }
