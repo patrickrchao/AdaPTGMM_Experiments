@@ -143,13 +143,7 @@ most methods control the FDR, with the exception of lfdr and ash, which have sli
 inflated FDR. Panels (B) contains the FDR results for simulations that 
 vary the number of hypotheses and the proportion of null hypotheses, respectively. 
 These results show that ash and lfdr fail to control FDR under certain settings. 
-# DO NOT RUN HERE, RUN LOCAL
-# DO NOT RUN HERE, RUN LOCAL
-# DO NOT RUN HERE, RUN LOCAL
 ```{r Figure2, fig.width = 7.5, fig.height = 6.5}
-# DO NOT RUN HERE, RUN LOCAL
-# DO NOT RUN HERE, RUN LOCAL
-# DO NOT RUN HERE, RUN LOCAL
 # FDR in in silico experiments across alpha values 
 ## Figure 2A: FDR of methods in representative yeast setting at varying alpha levels
 objects  <- list.files( path, recursive=TRUE, pattern="rds", full.names=TRUE )
